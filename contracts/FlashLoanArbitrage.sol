@@ -1,58 +1,121 @@
-require("@nomiclabs/hardhat-waffle")
-    require("hardhat-deploy")
-    require("dotenv").config()
+// SPDX-License-Identifier: MIT
+pragma solidity 0.8.10;
+
+import {FlashLoanSimpleReceiverBase} from "@aave/core-v3/contracts/flashloan/base/FlashLoanSimpleReceiverBase.sol";
+import {IPoolAddressesProvider} from "@aave/core-v3/contracts/interfaces/IPoolAddressesProvider.sol";
+import {IERC20} from "@aave/core-v3/contracts/dependencies/openzeppelin/contracts/IERC20.sol";
+
+interface IDex {
+    function depositUSDC(uint256 _amount) external;
+
+    function depositDAI(uint256 _amount) external;
+
+    function buyDAI() external;
+
+    function sellDAI() external;
+}
+
+contract FlashLoanArbitrage is FlashLoanSimpleReceiverBase {
+    address payable owner;
+    // Dex contract address
+    address private dexContractAddress =
+        0x81EA031a86EaD3AfbD1F50CF18b0B16394b1c076;
+
+    IERC20 private dai;
+    IERC20 private usdc;
+    IDex private dexContract;
+
+    constructor(address _addressProvider,address  _daiAddress, address _usdcAddress)
+        FlashLoanSimpleReceiverBase(IPoolAddressesProvider(_addressProvider))
+    {
+        owner = payable(msg.sender);
+
+        dai = IERC20(_daiAddress);
+        usdc = IERC20(_usdcAddress);
+        dexContract = IDex(dexContractAddress);
+    }
 
     /**
-     * @type import('hardhat/config').HardhatUserConfig
+        This function is called after your contract has received the flash loaned amount
      */
+    function executeOperation(
+        address asset,
+        uint256 amount,
+        uint256 premium,
+        address initiator,
+        bytes calldata params
+    ) external override returns (bool) {
+        //
+        // This contract now has the funds requested.
+        // Your logic goes here.
+        //
 
-    const SEPOLIA_RPC_URL =
-        process.env.SEPOLIA_RPC_URL || "https://eth-sepolia.g.alchemy.com/v2/YOUR-API-KEY"
-    const PRIVATE_KEY = process.env.PRIVATE_KEY || "0x"
+        // Arbirtage operation
+        dexContract.depositUSDC(1000000000); // 1000 USDC
+        dexContract.buyDAI();
+        dexContract.depositDAI(dai.balanceOf(address(this)));
+        dexContract.sellDAI();
 
-    module.exports = {
-        defaultNetwork: "hardhat",
-        networks: {
-            hardhat: {
-                // // If you want to do some forking, uncomment this
-                // forking: {
-                //   url: MAINNET_RPC_URL
-                // }
-                chainId: 31337,
-            },
-            localhost: {
-                chainId: 31337,
-            },
-            sepolia: {
-                url: SEPOLIA_RPC_URL,
-                accounts: PRIVATE_KEY !== undefined ? [PRIVATE_KEY] : [],
-                //   accounts: {
-                //     mnemonic: MNEMONIC,
-                //   },
-                saveDeployments: true,
-                chainId: 11155111,
-            },
-        },
-        namedAccounts: {
-            deployer: {
-                default: 0, // here this will by default take the first account as deployer
-                1: 0, // similarly on mainnet it will take the first account as deployer. Note though that depending on how hardhat network are configured, the account 0 on one network can be different than on another
-            },
-            player: {
-                default: 1,
-            },
-        },
-        solidity: {
-            compilers: [
-                {
-                    version: "0.8.7",
-                },
-                {
-                    version: "0.8.10",
-                },
-            ],
-        },
-        mocha: {
-            timeout: 500000, // 500 seconds max for running tests
-        },
+        // At the end of your logic above, this contract owes
+        // the flashloaned amount + premiums.
+        // Therefore ensure your contract has enough to repay
+        // these amounts.
+
+        // Approve the Pool contract allowance to *pull* the owed amount
+        uint256 amountOwed = amount + premium;
+        IERC20(asset).approve(address(POOL), amountOwed);
+
+        return true;
     }
+
+    function requestFlashLoan(address _token, uint256 _amount) public {
+        address receiverAddress = address(this);
+        address asset = _token;
+        uint256 amount = _amount;
+        bytes memory params = "";
+        uint16 referralCode = 0;
+
+        POOL.flashLoanSimple(
+            receiverAddress,
+            asset,
+            amount,
+            params,
+            referralCode
+        );
+    }
+
+    function approveUSDC(uint256 _amount) external returns (bool) {
+        return usdc.approve(dexContractAddress, _amount);
+    }
+
+    function allowanceUSDC() external view returns (uint256) {
+        return usdc.allowance(address(this), dexContractAddress);
+    }
+
+    function approveDAI(uint256 _amount) external returns (bool) {
+        return dai.approve(dexContractAddress, _amount);
+    }
+
+    function allowanceDAI() external view returns (uint256) {
+        return dai.allowance(address(this), dexContractAddress);
+    }
+
+    function getBalance(address _tokenAddress) external view returns (uint256) {
+        return IERC20(_tokenAddress).balanceOf(address(this));
+    }
+
+    function withdraw(address _tokenAddress) external onlyOwner {
+        IERC20 token = IERC20(_tokenAddress);
+        token.transfer(msg.sender, token.balanceOf(address(this)));
+    }
+
+    modifier onlyOwner() {
+        require(
+            msg.sender == owner,
+            "Only the contract owner can call this function"
+        );
+        _;
+    }
+
+    receive() external payable {}
+}
